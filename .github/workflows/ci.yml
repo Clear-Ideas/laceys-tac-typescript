@@ -15,7 +15,7 @@ jobs:
     name: Lockfile Hygiene
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Scan lockfiles + clean-room public install
         uses: twilio/sdk-actions/npm-lockfile-hygiene@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
@@ -24,7 +24,7 @@ jobs:
     name: Linting
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Artifactory OIDC Auth
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -61,7 +61,7 @@ jobs:
     name: Type Check
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Artifactory OIDC Auth
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -92,7 +92,7 @@ jobs:
     name: Test - Node 24
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Artifactory OIDC Auth
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -114,7 +114,7 @@ jobs:
     name: Test - Node 22
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Artifactory OIDC Auth
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -136,7 +136,7 @@ jobs:
     name: Getting Started Example
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Artifactory OIDC Auth
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -186,7 +186,7 @@ jobs:
     name: Build Package
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Artifactory OIDC Auth
         if: ${{ !github.event.pull_request.head.repo.fork }}
