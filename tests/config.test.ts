@@ -1,0 +1,694 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { TACConfig, CALL_EVENT_KINDS } from '@twilio/tac-core';
+
+describe('TACConfig', () => {
+  const getTestConfigData = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'SKtest123456789',
+    apiSecret: 'test_api_token_123',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+  });
+
+  // Store original env vars
+  let originalEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    originalEnv = {
+      TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
+      TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
+      TWILIO_API_KEY: process.env.TWILIO_API_KEY,
+      TWILIO_API_SECRET: process.env.TWILIO_API_SECRET,
+      TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER,
+      TWILIO_CONVERSATION_CONFIGURATION_ID: process.env.TWILIO_CONVERSATION_CONFIGURATION_ID,
+      TWILIO_VOICE_PUBLIC_DOMAIN: process.env.TWILIO_VOICE_PUBLIC_DOMAIN,
+      TWILIO_REGION: process.env.TWILIO_REGION,
+      TWILIO_STUDIO_HANDOFF_FLOW_SID: process.env.TWILIO_STUDIO_HANDOFF_FLOW_SID,
+      TWILIO_RCS_SENDER_ID: process.env.TWILIO_RCS_SENDER_ID,
+      TWILIO_MEMORY_PROFILE_TRAIT_GROUPS: process.env.TWILIO_MEMORY_PROFILE_TRAIT_GROUPS,
+      TWILIO_MEMORY_OBSERVATIONS_LIMIT: process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT,
+      TWILIO_MEMORY_SUMMARIES_LIMIT: process.env.TWILIO_MEMORY_SUMMARIES_LIMIT,
+      TWILIO_MEMORY_COMMUNICATIONS_LIMIT: process.env.TWILIO_MEMORY_COMMUNICATIONS_LIMIT,
+      TWILIO_MEMORY_RELEVANCE_THRESHOLD: process.env.TWILIO_MEMORY_RELEVANCE_THRESHOLD,
+    };
+  });
+
+  afterEach(() => {
+    // Restore original env vars
+    Object.keys(originalEnv).forEach(key => {
+      if (originalEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = originalEnv[key];
+      }
+    });
+  });
+
+  describe('constructor', () => {
+    it('should create config with valid data', () => {
+      const configData = getTestConfigData();
+      const config = new TACConfig(configData);
+
+      expect(config.accountSid).toBe('ACtest123456789');
+      expect(config.authToken).toBe('test_token_123');
+      expect(config.phoneNumber).toBe('+15551234567');
+      expect(config.conversationConfigurationId).toBe(
+        'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd'
+      );
+    });
+
+    it('should validate required fields', () => {
+      expect(() => {
+        new TACConfig({} as any);
+      }).toThrow();
+    });
+
+    it('should validate Twilio SID formats', () => {
+      const invalidConfig = {
+        ...getTestConfigData(),
+        accountSid: 'invalid_sid',
+        conversationConfigurationId: 'invalid_conv_sid',
+      };
+
+      expect(() => {
+        new TACConfig(invalidConfig);
+      }).toThrow();
+    });
+
+    it('should reject legacy comms_service format', () => {
+      const legacyConfig = {
+        ...getTestConfigData(),
+        conversationConfigurationId: 'comms_service_01kbjqhn79f0fvwfsxqzd5nqhd',
+      };
+
+      expect(() => {
+        new TACConfig(legacyConfig);
+      }).toThrow('Invalid Conversation Configuration ID format');
+    });
+
+    it('should store region when provided', () => {
+      const config = new TACConfig({
+        ...getTestConfigData(),
+        region: 'test-region',
+      });
+
+      expect(config.region).toBe('test-region');
+    });
+
+    it('should leave region undefined when not provided', () => {
+      const config = new TACConfig(getTestConfigData());
+
+      expect(config.region).toBeUndefined();
+    });
+
+    it('should store rcsSenderId when provided', () => {
+      const config = new TACConfig({
+        ...getTestConfigData(),
+        rcsSenderId: 'rcs:my_agent',
+      });
+
+      expect(config.rcsSenderId).toBe('rcs:my_agent');
+    });
+
+    it('should leave rcsSenderId undefined when not provided', () => {
+      const config = new TACConfig(getTestConfigData());
+
+      expect(config.rcsSenderId).toBeUndefined();
+    });
+
+    it('should accept single-character region', () => {
+      const config = new TACConfig({ ...getTestConfigData(), region: 'a' });
+
+      expect(config.region).toBe('a');
+    });
+
+    it('should reject invalid region values', () => {
+      const invalidRegions = [
+        'has spaces',
+        'has/slash',
+        'has:colon',
+        'UPPERCASE',
+        '-leading-dash',
+        'trailing-dash-',
+        'a'.repeat(64),
+      ];
+
+      for (const region of invalidRegions) {
+        expect(() => {
+          new TACConfig({ ...getTestConfigData(), region: region });
+        }).toThrow('Invalid Twilio region format');
+      }
+    });
+  });
+
+  describe('fromEnv', () => {
+    const setRequiredEnvVars = () => {
+      process.env.TWILIO_ACCOUNT_SID = 'ACtest123';
+      process.env.TWILIO_AUTH_TOKEN = 'test_auth_token';
+      process.env.TWILIO_API_KEY = 'SKtest123';
+      process.env.TWILIO_API_SECRET = 'test_api_token';
+      process.env.TWILIO_PHONE_NUMBER = '+1234567890';
+      process.env.TWILIO_CONVERSATION_CONFIGURATION_ID =
+        'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd';
+    };
+
+    it('should create config when all required env vars are set', () => {
+      setRequiredEnvVars();
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.accountSid).toBe('ACtest123');
+      expect(config.authToken).toBe('test_auth_token');
+      expect(config.phoneNumber).toBe('+1234567890');
+      expect(config.conversationConfigurationId).toBe(
+        'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd'
+      );
+    });
+
+    it('should include optional voicePublicDomain when set', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'example.ngrok.app';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.ngrok.app');
+    });
+
+    it('should strip an https:// protocol from voicePublicDomain', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'https://example.ngrok.app';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.ngrok.app');
+    });
+
+    it('should strip an http:// protocol from voicePublicDomain', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'http://example.ngrok.app';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.ngrok.app');
+    });
+
+    it('should strip a wss:// protocol from voicePublicDomain', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'wss://example.ngrok.app';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.ngrok.app');
+    });
+
+    it('should strip a trailing slash (and protocol) from voicePublicDomain', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'https://example.ngrok.app/';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.ngrok.app');
+    });
+
+    it('should accept voicePublicDomain with a base path', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'example.ngrok.app/server1';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.ngrok.app/server1');
+    });
+
+    it('should accept a multi-segment base path and strip scheme and trailing slash', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'https://example.com/a/b/';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.com/a/b');
+    });
+
+    it('should accept voicePublicDomain with a port', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'example.ngrok.app:8080';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('example.ngrok.app:8080');
+    });
+
+    it('should normalize rather than validate voicePublicDomain (Python SDK parity)', () => {
+      // Don't reintroduce a hostname pattern here without changing Python too.
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = '  https://internal_host.corp:8443/a/b/  ';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('internal_host.corp:8443/a/b');
+    });
+
+    it('should accept valid subdomain', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'my-app.example.ngrok.app';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('my-app.example.ngrok.app');
+    });
+
+    it('should accept valid domain with multiple subdomains', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'a.b.c.example.com';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('a.b.c.example.com');
+    });
+
+    it('should accept localhost', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = 'localhost';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('localhost');
+    });
+
+    it('should accept valid IP address', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_PUBLIC_DOMAIN = '192.168.1.100';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBe('192.168.1.100');
+    });
+
+    it('should allow voicePublicDomain to be undefined when not set', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_VOICE_PUBLIC_DOMAIN;
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voicePublicDomain).toBeUndefined();
+    });
+
+    it('should default the voice paths', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_VOICE_WEBSOCKET_PATH;
+      delete process.env.TWILIO_VOICE_ACTION_PATH;
+      delete process.env.TWILIO_VOICE_CALL_EVENT_PATH;
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voiceWebsocketPath).toBe('/ws');
+      expect(config.voiceActionPath).toBe('/conversation-relay-callback');
+      expect(config.voiceCallEventPath).toBe('/twilio/call-events');
+    });
+
+    it('should read voice paths from env vars', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_WEBSOCKET_PATH = '/voice/ws';
+      process.env.TWILIO_VOICE_ACTION_PATH = '/voice/cleanup';
+      process.env.TWILIO_VOICE_CALL_EVENT_PATH = '/voice/hooks';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voiceWebsocketPath).toBe('/voice/ws');
+      expect(config.voiceActionPath).toBe('/voice/cleanup');
+      expect(config.voiceCallEventPath).toBe('/voice/hooks');
+
+      delete process.env.TWILIO_VOICE_WEBSOCKET_PATH;
+      delete process.env.TWILIO_VOICE_ACTION_PATH;
+      delete process.env.TWILIO_VOICE_CALL_EVENT_PATH;
+    });
+
+    it('should apply defaults when voice path env vars are empty/whitespace', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_WEBSOCKET_PATH = '   ';
+      process.env.TWILIO_VOICE_ACTION_PATH = '';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.voiceWebsocketPath).toBe('/ws');
+      expect(config.voiceActionPath).toBe('/conversation-relay-callback');
+
+      delete process.env.TWILIO_VOICE_WEBSOCKET_PATH;
+      delete process.env.TWILIO_VOICE_ACTION_PATH;
+    });
+
+    it('should reject a voice path without a leading slash', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_WEBSOCKET_PATH = 'ws';
+
+      expect(() => TACConfig.fromEnv()).toThrow(/start with/);
+
+      delete process.env.TWILIO_VOICE_WEBSOCKET_PATH;
+    });
+
+    it('should reject a call-event path without a leading slash', () => {
+      // 'hooks/calls' would build 'https://example.comhooks/calls/status'.
+      setRequiredEnvVars();
+      process.env.TWILIO_VOICE_CALL_EVENT_PATH = 'hooks/calls';
+
+      expect(() => TACConfig.fromEnv()).toThrow(/start with/);
+
+      delete process.env.TWILIO_VOICE_CALL_EVENT_PATH;
+    });
+
+    it('should throw error when TWILIO_ACCOUNT_SID is missing', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_ACCOUNT_SID;
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Missing required environment variable: TWILIO_ACCOUNT_SID');
+    });
+
+    it('should throw error when TWILIO_AUTH_TOKEN is missing', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_AUTH_TOKEN;
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Missing required environment variable: TWILIO_AUTH_TOKEN');
+    });
+
+    it('should throw error when TWILIO_API_KEY is missing', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_API_KEY;
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Missing required environment variable: TWILIO_API_KEY');
+    });
+
+    it('should throw error when TWILIO_API_SECRET is missing', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_API_SECRET;
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Missing required environment variable: TWILIO_API_SECRET');
+    });
+
+    it('should throw error when TWILIO_PHONE_NUMBER is missing', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_PHONE_NUMBER;
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Missing required environment variable: TWILIO_PHONE_NUMBER');
+    });
+
+    it('should succeed without TWILIO_CONVERSATION_CONFIGURATION_ID (relay-only mode)', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_CONVERSATION_CONFIGURATION_ID;
+
+      const config = TACConfig.fromEnv();
+      expect(config.conversationConfigurationId).toBeUndefined();
+      expect(config.isOrchestratorEnabled()).toBe(false);
+    });
+
+    it('should throw error when no environment variables are set', () => {
+      Object.keys(originalEnv).forEach(key => {
+        delete process.env[key];
+      });
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Missing required environment variable');
+    });
+
+    it('should read TWILIO_REGION from environment', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_REGION = 'test-region';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.region).toBe('test-region');
+    });
+
+    it('should leave twilioRegion undefined when TWILIO_REGION is not set', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_REGION;
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.region).toBeUndefined();
+    });
+
+    it('should read TWILIO_STUDIO_HANDOFF_FLOW_SID from environment', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_STUDIO_HANDOFF_FLOW_SID = 'FW' + 'a'.repeat(32);
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.studioHandoffFlowSid).toBe('FW' + 'a'.repeat(32));
+    });
+
+    it('should leave studioHandoffFlowSid undefined when TWILIO_STUDIO_HANDOFF_FLOW_SID is not set', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_STUDIO_HANDOFF_FLOW_SID;
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.studioHandoffFlowSid).toBeUndefined();
+    });
+
+    it('should read TWILIO_RCS_SENDER_ID from environment', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_RCS_SENDER_ID = 'rcs:my_agent';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.rcsSenderId).toBe('rcs:my_agent');
+    });
+
+    it('should leave rcsSenderId undefined when TWILIO_RCS_SENDER_ID is not set', () => {
+      setRequiredEnvVars();
+      delete process.env.TWILIO_RCS_SENDER_ID;
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.rcsSenderId).toBeUndefined();
+    });
+
+    it('should use default memory configuration values when env vars not set', () => {
+      setRequiredEnvVars();
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.observationsLimit).toBe(20);
+      expect(config.memoryConfig.summariesLimit).toBe(5);
+      // Must stay 0: above 0, Memory rejects the /Recall "once" mode sends.
+      expect(config.memoryConfig.communicationsLimit).toBe(0);
+      expect(config.memoryConfig.relevanceThreshold).toBe(0.0);
+      expect(config.memoryConfig.traitGroups).toBeUndefined();
+    });
+
+    it('should parse custom memory configuration from env vars', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_PROFILE_TRAIT_GROUPS = 'Contact,Preferences';
+      process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT = '10';
+      process.env.TWILIO_MEMORY_SUMMARIES_LIMIT = '3';
+      process.env.TWILIO_MEMORY_COMMUNICATIONS_LIMIT = '5';
+      process.env.TWILIO_MEMORY_RELEVANCE_THRESHOLD = '0.7';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.traitGroups).toEqual(['Contact', 'Preferences']);
+      expect(config.memoryConfig.observationsLimit).toBe(10);
+      expect(config.memoryConfig.summariesLimit).toBe(3);
+      expect(config.memoryConfig.communicationsLimit).toBe(5);
+      expect(config.memoryConfig.relevanceThreshold).toBe(0.7);
+    });
+
+    it('should handle whitespace in trait groups', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_PROFILE_TRAIT_GROUPS = ' Contact , Preferences , Custom ';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.traitGroups).toEqual(['Contact', 'Preferences', 'Custom']);
+    });
+
+    it('should filter empty strings from trait groups', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_PROFILE_TRAIT_GROUPS = 'Contact,,Preferences,';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.traitGroups).toEqual(['Contact', 'Preferences']);
+    });
+
+    it('should handle empty trait groups string', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_PROFILE_TRAIT_GROUPS = '';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.traitGroups).toBeUndefined();
+    });
+
+    it('should handle whitespace-only trait groups string', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_PROFILE_TRAIT_GROUPS = '   ';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.traitGroups).toBeUndefined();
+    });
+
+    it('should handle delimiter-only trait groups string', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_PROFILE_TRAIT_GROUPS = ',,,';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.traitGroups).toBeUndefined();
+    });
+
+    it('should handle whitespace-only memory limit env vars', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT = '   ';
+      process.env.TWILIO_MEMORY_SUMMARIES_LIMIT = '  ';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.observationsLimit).toBe(20);
+      expect(config.memoryConfig.summariesLimit).toBe(5);
+    });
+
+    it('should accept zero values for memory limits', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT = '0';
+      process.env.TWILIO_MEMORY_SUMMARIES_LIMIT = '0';
+      process.env.TWILIO_MEMORY_COMMUNICATIONS_LIMIT = '0';
+
+      const config = TACConfig.fromEnv();
+
+      expect(config.memoryConfig.observationsLimit).toBe(0);
+      expect(config.memoryConfig.summariesLimit).toBe(0);
+      expect(config.memoryConfig.communicationsLimit).toBe(0);
+    });
+
+    it('should throw error for invalid observations limit', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT = 'abc';
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Invalid TWILIO_MEMORY_OBSERVATIONS_LIMIT: expected an integer, got "abc"');
+    });
+
+    it('should throw error for out of range observations limit', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT = '150';
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Invalid TWILIO_MEMORY_OBSERVATIONS_LIMIT: must be between 0 and 100, got 150');
+    });
+
+    it('should throw error for invalid relevance threshold', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_RELEVANCE_THRESHOLD = 'not_a_number';
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow(
+        'Invalid TWILIO_MEMORY_RELEVANCE_THRESHOLD: expected a number, got "not_a_number"'
+      );
+    });
+
+    it('should throw error for out of range relevance threshold', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_RELEVANCE_THRESHOLD = '1.5';
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Invalid TWILIO_MEMORY_RELEVANCE_THRESHOLD: must be between 0 and 1, got 1.5');
+    });
+
+    it('should reject partially valid integer values', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT = '10abc';
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Invalid TWILIO_MEMORY_OBSERVATIONS_LIMIT: expected an integer, got "10abc"');
+    });
+
+    it('should reject float values for integer fields', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_OBSERVATIONS_LIMIT = '10.5';
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Invalid TWILIO_MEMORY_OBSERVATIONS_LIMIT: expected an integer, got "10.5"');
+    });
+
+    it('should reject partially valid float values', () => {
+      setRequiredEnvVars();
+      process.env.TWILIO_MEMORY_RELEVANCE_THRESHOLD = '0.5abc';
+
+      expect(() => {
+        TACConfig.fromEnv();
+      }).toThrow('Invalid TWILIO_MEMORY_RELEVANCE_THRESHOLD: expected a number, got "0.5abc"');
+    });
+  });
+
+  describe('getBasicAuthCredentials', () => {
+    it('should return basic auth credentials', () => {
+      const configData = getTestConfigData();
+      const config = new TACConfig(configData);
+
+      const credentials = config.getBasicAuthCredentials();
+
+      expect(credentials.username).toBe('ACtest123456789');
+      expect(credentials.password).toBe('test_token_123');
+    });
+  });
+
+  // One source of truth for the channel's URL construction and the server's
+  // route registration.
+  describe('call event paths', () => {
+    it('builds one path per kind', () => {
+      const config = new TACConfig(getTestConfigData());
+
+      expect(config.callEventPath('status')).toBe('/twilio/call-events/status');
+      expect(config.callEventPath('amd')).toBe('/twilio/call-events/amd');
+      expect(config.callEventPath('recording')).toBe('/twilio/call-events/recording');
+    });
+
+    it('normalizes a trailing slash on the base path', () => {
+      const config = new TACConfig({ ...getTestConfigData(), voiceCallEventPath: '/hooks/calls/' });
+
+      expect(config.callEventPath('amd')).toBe('/hooks/calls/amd');
+    });
+
+    it('returns no URL without a public domain', () => {
+      const config = new TACConfig(getTestConfigData());
+
+      expect(config.callEventUrl('status')).toBeUndefined();
+    });
+
+    it('builds a URL from the public domain', () => {
+      const config = new TACConfig({
+        ...getTestConfigData(),
+        voicePublicDomain: 'example.ngrok.app',
+      });
+
+      expect(config.callEventUrl('status')).toBe(
+        'https://example.ngrok.app/twilio/call-events/status'
+      );
+    });
+
+    it('covers every kind in CALL_EVENT_KINDS', () => {
+      // CALL_EVENT_KINDS is what TACServer iterates to register and validate its
+      // routes; this pins the set they have to stay in step with.
+      expect([...CALL_EVENT_KINDS]).toEqual(['status', 'amd', 'recording']);
+    });
+  });
+});

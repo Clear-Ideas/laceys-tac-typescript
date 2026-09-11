@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+FROM node:22.13-slim AS base
+WORKDIR /app
+
+# Copy the whole monorepo (root SDK + all getting_started examples).
+COPY . .
+
+# npm workspaces: a single install at the root resolves and links
+# node_modules for every workspace package, including
+# getting_started/examples/laceys.
+RUN npm install
+
+# Build the SDK (creates dist/ at the root).
+RUN npm run build
+
+WORKDIR /app/getting_started/examples/laceys
+EXPOSE 8000
+CMD ["npx", "tsx", "src/index.ts"]

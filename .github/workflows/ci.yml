@@ -1,0 +1,239 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  lockfile-hygiene:
+    name: Lockfile Hygiene
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Scan lockfiles + clean-room public install
+        uses: twilio/sdk-actions/npm-lockfile-hygiene@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
+
+  lint:
+    name: Linting
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22.13"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint check
+        run: |
+          echo "Linting TypeScript files (packages/*/src and src/):"
+          find packages/*/src src -name "*.ts" -type f 2>/dev/null | sort | head -30
+          echo ""
+          echo "Total TypeScript files to lint:"
+          find packages/*/src src -name "*.ts" -type f 2>/dev/null | wc -l
+          echo ""
+          npm run lint
+
+      - name: Run format check
+        run: |
+          echo "Checking formatting for TypeScript files (packages/*/src, src/, and getting_started/):"
+          find packages/*/src src getting_started -name "*.ts" -type f 2>/dev/null | wc -l
+          echo "files"
+          echo ""
+          npm run format:check
+
+  type-check:
+    name: Type Check
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22.13"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run type check
+        run: |
+          echo "Type checking TypeScript files (tsconfig.json excludes getting_started/):"
+          echo ""
+          echo "TypeScript files in packages/:"
+          find packages -name "*.ts" -type f 2>/dev/null | wc -l || echo "0"
+          echo ""
+          echo "TypeScript files in src/:"
+          find src -name "*.ts" -type f 2>/dev/null | wc -l || echo "0"
+          echo ""
+          npm run typecheck
+
+  test-node-24:
+    name: Test - Node 24
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  test-node-22:
+    name: Test - Node 22
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22.13"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  getting-started-example:
+    name: Getting Started Example
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22.13"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            getting_started/examples/openai/package-lock.json
+            getting_started/examples/chat/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Build package
+        run: npm run build
+
+      - name: Install openai example dependencies
+        working-directory: getting_started/examples/openai
+        run: npm ci
+
+      - name: Lint openai example
+        working-directory: getting_started/examples/openai
+        run: npx eslint src/**/*.ts
+
+      - name: Type check openai example
+        working-directory: getting_started/examples/openai
+        run: npx tsc --noEmit
+
+      - name: Install chat example dependencies
+        working-directory: getting_started/examples/chat
+        run: npm ci
+
+      - name: Lint chat example
+        working-directory: getting_started/examples/chat
+        run: npx eslint src/**/*.ts
+
+      - name: Type check chat example
+        working-directory: getting_started/examples/chat
+        run: npx tsc --noEmit
+
+  build:
+    name: Build Package
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Artifactory OIDC Auth
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: twilio/sdk-actions/artifactory-oidc@26f95a54e57993c1bf3b26bec2905f395814c23a # v1.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22.13"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build package
+        run: npm run build
+
+      - name: Check build output
+        run: |
+          echo "Checking dist/ output:"
+          ls -lah dist/
+          echo ""
+          echo "Verifying package exports:"
+          node --input-type=module -e "import('./dist/index.js').then((tac) => { console.log('Successfully imported package'); console.log('Exports:', Object.keys(tac).slice(0, 10).join(', '), '...'); });"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+
+  all-checks:
+    name: All Checks Passed
+    needs: [lockfile-hygiene, lint, type-check, test-node-22, test-node-24, getting-started-example, build]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'ubuntu-x64' }}
+    if: always()
+    steps:
+      - name: Check all job statuses
+        run: |
+          if [ "${{ needs['lockfile-hygiene'].result }}" != "success" ] || \
+             [ "${{ needs.lint.result }}" != "success" ] || \
+             [ "${{ needs['type-check'].result }}" != "success" ] || \
+             [ "${{ needs['test-node-22'].result }}" != "success" ] || \
+             [ "${{ needs['test-node-24'].result }}" != "success" ] || \
+             [ "${{ needs['getting-started-example'].result }}" != "success" ] || \
+             [ "${{ needs.build.result }}" != "success" ]; then
+            echo "One or more checks failed"
+            exit 1
+          fi
+          echo "All checks passed successfully!"

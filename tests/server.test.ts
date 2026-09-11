@@ -1,0 +1,1468 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createTestTAC } from './helpers/tac';
+import { TAC, TACConfig, SMSChannel, RCSChannel, VoiceChannel } from '@twilio/tac-core';
+import { TACServer } from '@twilio/tac-server';
+import WebSocket from 'ws';
+
+// Mock twilio module - use vi.hoisted since vi.mock is hoisted to top of file
+const { mockValidateRequest, mockValidateRequestWithBody } = vi.hoisted(() => ({
+  mockValidateRequest: vi.fn(),
+  mockValidateRequestWithBody: vi.fn(),
+}));
+
+vi.mock('twilio', () => {
+  const createClient = vi.fn(() => ({
+    messages: {
+      create: vi.fn().mockResolvedValue({ sid: 'SM00000000000000000000000000000000' }),
+    },
+  }));
+  // Add validation functions to the default export
+  createClient.validateRequest = mockValidateRequest;
+  createClient.validateRequestWithBody = mockValidateRequestWithBody;
+
+  return {
+    default: createClient,
+  };
+});
+
+// Use different ports for parallel test execution
+let testPort = 4000;
+const getNextPort = () => testPort++;
+
+describe('TACServer Webhook Validation', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let currentPort: number;
+
+  beforeEach(async () => {
+    // Reset mock
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+
+    // Get unique port for this test
+    currentPort = getNextPort();
+
+    // Create TAC instance
+    const config = new TACConfig(getTestConfig());
+    tac = await createTestTAC(config);
+
+    // Register channels (required for route handlers)
+    const smsChannel = new SMSChannel(tac);
+    const voiceChannel = new VoiceChannel(tac);
+    tac.registerChannel(smsChannel);
+    tac.registerChannel(voiceChannel);
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  it('should reject requests with invalid signature', async () => {
+    mockValidateRequest.mockReturnValue(false);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const response = await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Twilio-Signature': 'invalid-signature',
+      },
+      body: 'From=%2B15551234567&Body=Hello',
+    });
+
+    expect(response.status).toBe(403);
+    const body = await response.json();
+    expect(body.error).toBe('Invalid webhook signature');
+  });
+
+  it('should accept requests with valid signature', async () => {
+    mockValidateRequest.mockReturnValue(true);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const response = await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Twilio-Signature': 'valid-signature',
+      },
+      body: 'eventType=COMMUNICATION_CREATED&data=%7B%22conversationId%22%3A%22CH123%22%7D',
+    });
+
+    expect(response.status).not.toBe(403);
+  });
+
+  it('should not validate signatures on user-added routes', async () => {
+    // Regression test: signature validation should be scoped to TAC-registered
+    // webhook routes and not apply to custom routes registered on
+    // `server.fastify`. Previously a global preHandler 403'd any non-webhook
+    // POST route that lacked an X-Twilio-Signature header.
+    mockValidateRequest.mockReturnValue(false);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    server.fastify.post('/custom', async () => ({ hello: 'world' }));
+
+    await server.start();
+
+    const response = await fetch(`http://localhost:${currentPort}/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anything: 'at all' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ hello: 'world' });
+    expect(mockValidateRequest).not.toHaveBeenCalled();
+  });
+
+  it('should call validateRequest with correct parameters', async () => {
+    mockValidateRequest.mockReturnValue(true);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Twilio-Signature': 'test-signature',
+      },
+      body: 'From=%2B15551234567',
+    });
+
+    expect(mockValidateRequest).toHaveBeenCalledWith(
+      'test_token_123',
+      'test-signature',
+      expect.stringContaining('/webhook'),
+      expect.objectContaining({ From: '+15551234567' })
+    );
+  });
+
+  describe('URL construction for validation', () => {
+    it('should handle X-Forwarded-Proto header', async () => {
+      mockValidateRequest.mockReturnValue(true);
+
+      server = new TACServer(tac, {
+        development: true,
+        port: currentPort,
+      });
+
+      await server.start();
+
+      await fetch(`http://localhost:${currentPort}/webhook`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Twilio-Signature': 'sig',
+          'X-Forwarded-Proto': 'https',
+        },
+        body: 'From=test',
+      });
+
+      // Check that URL was constructed with https
+      expect(mockValidateRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.stringMatching(/^https:\/\//),
+        expect.any(Object)
+      );
+    });
+
+    it('should handle X-Forwarded-Host header', async () => {
+      mockValidateRequest.mockReturnValue(true);
+
+      server = new TACServer(tac, {
+        development: true,
+        port: currentPort,
+      });
+
+      await server.start();
+
+      await fetch(`http://localhost:${currentPort}/webhook`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Twilio-Signature': 'sig',
+          'X-Forwarded-Host': 'my-app.ngrok.io',
+        },
+        body: 'From=test',
+      });
+
+      // Check that URL was constructed with forwarded host
+      expect(mockValidateRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.stringContaining('my-app.ngrok.io'),
+        expect.any(Object)
+      );
+    });
+
+    it('should use first value from comma-separated X-Forwarded-Proto', async () => {
+      mockValidateRequest.mockReturnValue(true);
+
+      server = new TACServer(tac, {
+        development: true,
+        port: currentPort,
+      });
+
+      await server.start();
+
+      await fetch(`http://localhost:${currentPort}/webhook`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Twilio-Signature': 'sig',
+          'X-Forwarded-Proto': 'https, http',
+        },
+        body: 'From=test',
+      });
+
+      expect(mockValidateRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.stringMatching(/^https:\/\//),
+        expect.any(Object)
+      );
+    });
+
+    it('should use first value from comma-separated X-Forwarded-Host', async () => {
+      mockValidateRequest.mockReturnValue(true);
+
+      server = new TACServer(tac, {
+        development: true,
+        port: currentPort,
+      });
+
+      await server.start();
+
+      await fetch(`http://localhost:${currentPort}/webhook`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Twilio-Signature': 'sig',
+          'X-Forwarded-Host': 'app.ngrok.io, proxy.internal',
+        },
+        body: 'From=test',
+      });
+
+      expect(mockValidateRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.stringContaining('app.ngrok.io'),
+        expect.any(Object)
+      );
+      expect(mockValidateRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.not.stringContaining('proxy.internal'),
+        expect.any(Object)
+      );
+    });
+
+    it('should default to https:// when X-Forwarded-Proto is absent', async () => {
+      mockValidateRequest.mockReturnValue(true);
+
+      server = new TACServer(tac, {
+        development: true,
+        port: currentPort,
+      });
+
+      await server.start();
+
+      await fetch(`http://localhost:${currentPort}/webhook`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Twilio-Signature': 'sig',
+        },
+        body: 'From=test',
+      });
+
+      expect(mockValidateRequest).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.stringMatching(/^https:\/\//),
+        expect.any(Object)
+      );
+    });
+  });
+
+  describe('validation on different endpoints', () => {
+    let endpointTestPort: number;
+
+    beforeEach(async () => {
+      mockValidateRequest.mockReturnValue(false);
+      endpointTestPort = currentPort;
+
+      server = new TACServer(tac, {
+        development: true,
+        port: endpointTestPort,
+      });
+
+      await server.start();
+    });
+
+    it('should validate /twiml webhook endpoint', async () => {
+      const response = await fetch(`http://localhost:${endpointTestPort}/twiml`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Twilio-Signature': 'invalid',
+        },
+        body: 'From=%2B15551234567&To=%2B15559876543&CallSid=CA123',
+      });
+
+      expect(response.status).toBe(403);
+    });
+
+    it('should validate /conversation-relay-callback endpoint', async () => {
+      const response = await fetch(
+        `http://localhost:${endpointTestPort}/conversation-relay-callback`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Twilio-Signature': 'invalid',
+          },
+          body: 'AccountSid=AC123&CallSid=CA123&CallStatus=completed&From=%2B1234&To=%2B5678',
+        }
+      );
+
+      expect(response.status).toBe(403);
+    });
+  });
+
+  it('should pass raw JSON body to validateRequestWithBody for bodySHA256 validation', async () => {
+    mockValidateRequestWithBody.mockReturnValue(true);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const jsonBody = '{"key":"value","number":42}';
+
+    await fetch(`http://localhost:${currentPort}/webhook?bodySHA256=abc123`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Twilio-Signature': 'test-sig',
+      },
+      body: jsonBody,
+    });
+
+    expect(mockValidateRequestWithBody).toHaveBeenCalledWith(
+      'test_token_123',
+      'test-sig',
+      expect.stringContaining('/webhook?bodySHA256=abc123'),
+      jsonBody
+    );
+  });
+});
+
+describe('TACServer idempotency token', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let smsChannel: SMSChannel;
+  let currentPort: number;
+
+  beforeEach(async () => {
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+    mockValidateRequest.mockReturnValue(true);
+
+    currentPort = getNextPort();
+
+    const config = new TACConfig(getTestConfig());
+    tac = await createTestTAC(config);
+
+    smsChannel = new SMSChannel(tac);
+    const voiceChannel = new VoiceChannel(tac);
+    tac.registerChannel(smsChannel);
+    tac.registerChannel(voiceChannel);
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  it('should pass i-twilio-idempotency-token header to channels', async () => {
+    const processWebhookSpy = vi.spyOn(smsChannel, 'processWebhook');
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'i-twilio-idempotency-token': 'tok-abc-123',
+      },
+      body: JSON.stringify({
+        eventType: 'COMMUNICATION_CREATED',
+        data: { conversationId: 'CHtest123456789' },
+      }),
+    });
+
+    await vi.waitFor(() => {
+      expect(processWebhookSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: 'COMMUNICATION_CREATED' }),
+        'tok-abc-123'
+      );
+    });
+  });
+
+  it('should pass undefined when no idempotency token header is present', async () => {
+    const processWebhookSpy = vi.spyOn(smsChannel, 'processWebhook');
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        eventType: 'COMMUNICATION_CREATED',
+        data: { conversationId: 'CHtest123456789' },
+      }),
+    });
+
+    await vi.waitFor(() => {
+      expect(processWebhookSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: 'COMMUNICATION_CREATED' }),
+        undefined
+      );
+    });
+  });
+});
+
+describe('TACServer messaging channel auto-discovery', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    rcsSenderId: 'rcs:test_agent',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let currentPort: number;
+
+  beforeEach(async () => {
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+    mockValidateRequest.mockReturnValue(true);
+    currentPort = getNextPort();
+
+    const config = new TACConfig(getTestConfig());
+    tac = await createTestTAC(config);
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  it('fans a webhook out to a registered RCS channel when messagingChannels is omitted', async () => {
+    const smsChannel = new SMSChannel(tac);
+    const rcsChannel = new RCSChannel(tac);
+    tac.registerChannel(smsChannel);
+    tac.registerChannel(rcsChannel);
+
+    const rcsSpy = vi.spyOn(rcsChannel, 'processWebhook');
+    const smsSpy = vi.spyOn(smsChannel, 'processWebhook');
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventType: 'COMMUNICATION_CREATED',
+        data: {
+          conversationId: 'CHtest123456789',
+          author: { channel: 'RCS', address: 'rcs:+15551234567' },
+          content: { type: 'TEXT', text: 'hi' },
+        },
+      }),
+    });
+
+    await vi.waitFor(() => {
+      expect(rcsSpy).toHaveBeenCalled();
+      expect(smsSpy).toHaveBeenCalled();
+    });
+  });
+});
+
+describe('TACServer voice TwiML', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let voiceChannel: VoiceChannel;
+  let currentPort: number;
+
+  beforeEach(async () => {
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+    mockValidateRequest.mockReturnValue(true); // Default to valid
+
+    currentPort = getNextPort();
+
+    const config = new TACConfig(getTestConfig());
+    tac = await createTestTAC(config);
+
+    const smsChannel = new SMSChannel(tac);
+    voiceChannel = new VoiceChannel(tac);
+    tac.registerChannel(smsChannel);
+    tac.registerChannel(voiceChannel);
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  it('passes a parsed TwiMLRequest to handleIncomingCall', async () => {
+    const handleIncomingCallSpy = vi.spyOn(voiceChannel, 'handleIncomingCall');
+    handleIncomingCallSpy.mockResolvedValue(
+      '<Response><Connect><ConversationRelay/></Connect></Response>'
+    );
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    await fetch(`http://localhost:${currentPort}/twiml`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'From=%2B15551234567&To=%2B15559876543&CallSid=CA123&CallerCountry=US',
+    });
+
+    expect(handleIncomingCallSpy).toHaveBeenCalledTimes(1);
+    const twimlRequest = handleIncomingCallSpy.mock.calls[0]?.[0];
+    expect(twimlRequest).toEqual(
+      expect.objectContaining({
+        from: '+15551234567',
+        to: '+15559876543',
+        callerCountry: 'US',
+      })
+    );
+  });
+
+  it('channel defaultTwimlOptions flow into emitted TwiML', async () => {
+    // Use the real handleIncomingCall (no spy) with a channel configured with
+    // defaultTwimlOptions. Mirror the beforeEach setup with a fresh channel.
+    const cfgTac = await createTestTAC(new TACConfig(getTestConfig()));
+    const sms = new SMSChannel(cfgTac);
+    const voice = new VoiceChannel(cfgTac, {
+      defaultTwimlOptions: { welcomeGreeting: 'Server greeting', voice: 'en-US-Journey-D' },
+    });
+    cfgTac.registerChannel(sms);
+    cfgTac.registerChannel(voice);
+
+    server = new TACServer(cfgTac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const resp = await fetch(`http://localhost:${currentPort}/twiml`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'From=%2B15551234567&To=%2B15559876543&CallSid=CA123',
+    });
+
+    const text = await resp.text();
+    expect(text).toContain('welcomeGreeting="Server greeting"');
+    expect(text).toContain('voice="en-US-Journey-D"');
+    expect(text).toContain('url="wss://test.ngrok.io/ws"');
+
+    cfgTac.shutdown();
+  });
+
+  it('runs an inbound customizer registered on the channel', async () => {
+    const cfgTac = await createTestTAC(new TACConfig(getTestConfig()));
+    const sms = new SMSChannel(cfgTac);
+    const voice = new VoiceChannel(cfgTac);
+    voice.onInboundCallTwiml(async () => ({ voice: 'es-MX-Neural2-A', language: 'es-MX' }));
+    cfgTac.registerChannel(sms);
+    cfgTac.registerChannel(voice);
+
+    server = new TACServer(cfgTac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const resp = await fetch(`http://localhost:${currentPort}/twiml`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'From=%2B14155551234&CallerCountry=MX',
+    });
+
+    const text = await resp.text();
+    expect(text).toContain('voice="es-MX-Neural2-A"');
+    expect(text).toContain('language="es-MX"');
+
+    cfgTac.shutdown();
+  });
+
+  it('throws at construction when voice channel attached but voicePublicDomain unset', async () => {
+    const cfg = getTestConfig();
+    delete (cfg as { voicePublicDomain?: string }).voicePublicDomain;
+
+    const t = await createTestTAC(new TACConfig(cfg));
+    const sms = new SMSChannel(t);
+    const voice = new VoiceChannel(t);
+    t.registerChannel(sms);
+    t.registerChannel(voice);
+
+    expect(() => new TACServer(t, { port: getNextPort() })).toThrow(/voicePublicDomain/);
+
+    t.shutdown();
+  });
+});
+
+// One route per Twilio callback; the route is the event discriminator.
+describe('TACServer call event routes', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let voiceChannel: VoiceChannel;
+  let currentPort: number;
+
+  beforeEach(async () => {
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+    mockValidateRequest.mockReturnValue(true);
+
+    currentPort = getNextPort();
+
+    tac = await createTestTAC(new TACConfig(getTestConfig()));
+    voiceChannel = new VoiceChannel(tac);
+    tac.registerChannel(voiceChannel);
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  const post = async (path: string, body: string): Promise<Response> =>
+    fetch(`http://localhost:${currentPort}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Twilio-Signature': 'valid',
+      },
+      body,
+    });
+
+  it('registers all three routes at the configured base path', async () => {
+    const cfg = { ...getTestConfig(), voiceCallEventPath: '/hooks/calls' };
+    const t = await createTestTAC(new TACConfig(cfg));
+    const voice = new VoiceChannel(t);
+    t.registerChannel(voice);
+    const port = getNextPort();
+    const s = new TACServer(t, { port });
+    await s.start();
+
+    const seen: string[] = [];
+    voice.onCallStatus(() => {
+      seen.push('status');
+    });
+    voice.onAmd(() => {
+      seen.push('amd');
+    });
+    voice.onRecording(() => {
+      seen.push('recording');
+    });
+
+    for (const kind of ['status', 'amd', 'recording']) {
+      const resp = await fetch(`http://localhost:${port}/hooks/calls/${kind}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Twilio-Signature': 'valid',
+        },
+        body: 'CallSid=CA1',
+      });
+      expect(resp.status).toBe(200);
+    }
+    expect(seen).toEqual(['status', 'amd', 'recording']);
+
+    await s.stop().catch(() => {});
+    t.shutdown();
+  });
+
+  it.each(['status', 'amd', 'recording'])('rejects an invalid signature on /%s', async kind => {
+    mockValidateRequest.mockReturnValue(false);
+    server = new TACServer(tac, { port: currentPort });
+    await server.start();
+
+    const resp = await post(`/twilio/call-events/${kind}`, 'CallSid=CA1');
+
+    expect(resp.status).toBe(403);
+  });
+
+  it.each([
+    ['status', 'CallSid=CA1&CallStatus=no-answer', 'callStatus', 'no-answer'],
+    ['amd', 'CallSid=CA1&AnsweredBy=machine_start', 'answeredBy', 'machine_start'],
+    ['recording', 'CallSid=CA1&RecordingStatus=completed', 'recordingStatus', 'completed'],
+  ])('dispatches /%s to its own handler', async (kind, body, field, expected) => {
+    // Pins each route to its own handler, not all three to one.
+    const received: Record<string, unknown[]> = { status: [], amd: [], recording: [] };
+    voiceChannel.onCallStatus(event => {
+      received.status!.push(event);
+    });
+    voiceChannel.onAmd(event => {
+      received.amd!.push(event);
+    });
+    voiceChannel.onRecording(event => {
+      received.recording!.push(event);
+    });
+
+    server = new TACServer(tac, { port: currentPort });
+    await server.start();
+
+    const resp = await post(`/twilio/call-events/${kind}`, `AccountSid=ACtest123456789&${body}`);
+
+    expect(resp.status).toBe(200);
+    expect(received[kind]).toHaveLength(1);
+    expect((received[kind]![0] as Record<string, unknown>)[field]).toBe(expected);
+    // Only the matching handler fired.
+    for (const [other, events] of Object.entries(received)) {
+      if (other !== kind) expect(events).toEqual([]);
+    }
+  });
+
+  it('returns 200 with no handler registered', async () => {
+    // Routes register unconditionally, so a stale config no-ops instead of 404ing.
+    server = new TACServer(tac, { port: currentPort });
+    await server.start();
+
+    const resp = await post('/twilio/call-events/status', 'CallSid=CA1&CallStatus=completed');
+
+    expect(resp.status).toBe(200);
+  });
+
+  it('returns 400 when the handler throws', async () => {
+    voiceChannel.onAmd(() => {
+      throw new Error('handler exploded');
+    });
+    server = new TACServer(tac, { port: currentPort });
+    await server.start();
+
+    const resp = await post('/twilio/call-events/amd', 'CallSid=CA1&AnsweredBy=human');
+
+    expect(resp.status).toBe(400);
+  });
+
+  it('returns 400 when CallSid is missing', async () => {
+    // Better a 400 than handing the handler an empty SID to act on.
+    const received: unknown[] = [];
+    voiceChannel.onAmd(event => {
+      received.push(event);
+    });
+    server = new TACServer(tac, { port: currentPort });
+    await server.start();
+
+    const resp = await post('/twilio/call-events/amd', 'AnsweredBy=machine_start');
+
+    expect(resp.status).toBe(400);
+    expect(received).toEqual([]);
+  });
+
+  it('throws at construction when a derived call-event path collides', async () => {
+    // Checked on the derived /status path — why this collision is invisible.
+    const t = await createTestTAC(
+      new TACConfig({ ...getTestConfig(), voiceCallEventPath: '/hooks' })
+    );
+    const voice = new VoiceChannel(t);
+    t.registerChannel(voice);
+
+    expect(
+      () => new TACServer(t, { port: getNextPort(), webhookPaths: { twiml: '/hooks/status' } })
+    ).toThrow(/collides with/);
+
+    t.shutdown();
+  });
+
+  it('allows the call-event base to equal another path', async () => {
+    // Sharing a base is fine — the registered paths are <base>/<kind>.
+    const t = await createTestTAC(
+      new TACConfig({ ...getTestConfig(), voiceCallEventPath: '/twiml' })
+    );
+    const voice = new VoiceChannel(t);
+    t.registerChannel(voice);
+
+    // No throw: /twiml vs /twiml/status, /twiml/amd, /twiml/recording.
+    expect(
+      () => new TACServer(t, { port: getNextPort(), webhookPaths: { twiml: '/twiml' } })
+    ).not.toThrow();
+
+    t.shutdown();
+  });
+
+  it('leaves pre-existing path collisions alone', async () => {
+    // Scoped to voiceCallEventPath — configs that used to start still do.
+    const t = await createTestTAC(new TACConfig({ ...getTestConfig(), voiceActionPath: '/twiml' }));
+    const voice = new VoiceChannel(t);
+    t.registerChannel(voice);
+
+    expect(
+      () => new TACServer(t, { port: getNextPort(), webhookPaths: { twiml: '/twiml' } })
+    ).not.toThrow();
+
+    t.shutdown();
+  });
+});
+
+describe('TACServer customization', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let currentPort: number;
+
+  beforeEach(async () => {
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+    mockValidateRequest.mockReturnValue(true);
+    mockValidateRequestWithBody.mockReturnValue(true);
+
+    currentPort = getNextPort();
+
+    const config = new TACConfig(getTestConfig());
+    tac = await createTestTAC(config);
+
+    const smsChannel = new SMSChannel(tac);
+    const voiceChannel = new VoiceChannel(tac);
+    tac.registerChannel(smsChannel);
+    tac.registerChannel(voiceChannel);
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  it('uses the provided Fastify instance', async () => {
+    const Fastify = (await import('fastify')).default;
+    const customApp = Fastify({ logger: false });
+
+    server = new TACServer(tac, {
+      fastifyInstance: customApp,
+      port: currentPort,
+    });
+
+    expect(server.fastify).toBe(customApp);
+  });
+
+  it('mounts TAC endpoints and user routes on a provided Fastify instance', async () => {
+    const Fastify = (await import('fastify')).default;
+    const customApp = Fastify({ logger: false });
+
+    // User registers their own route + hook before TAC start()
+    customApp.get('/health', async () => ({ status: 'ok' }));
+    customApp.addHook('onSend', async (_req, reply, payload) => {
+      reply.header('x-user-hook', 'yes');
+      return payload;
+    });
+
+    server = new TACServer(tac, {
+      fastifyInstance: customApp,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    // User route is reachable
+    const health = await fetch(`http://localhost:${currentPort}/health`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ status: 'ok' });
+
+    // User hook also fires on TAC's own routes
+    const twiml = await fetch(`http://localhost:${currentPort}/twiml`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'From=%2B15551234567&To=%2B15559876543&CallSid=CA123',
+    });
+    expect(twiml.status).not.toBe(404); // TAC /twiml is mounted
+    expect(twiml.headers.get('x-user-hook')).toBe('yes');
+
+    // User hook also fires on the /webhook (messaging) route
+    const sms = await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'From=%2B15551234567&Body=hi',
+    });
+    expect(sms.status).not.toBe(404); // TAC /webhook is mounted
+    expect(sms.headers.get('x-user-hook')).toBe('yes');
+  });
+
+  it('does not crash when user pre-registers plugins TAC also needs', async () => {
+    const Fastify = (await import('fastify')).default;
+    const formbody = (await import('@fastify/formbody')).default;
+    const websocket = (await import('@fastify/websocket')).default;
+
+    const customApp = Fastify({ logger: false });
+    // Simulate a user who registers formbody + websocket themselves for their
+    // own routes. start() should detect and skip duplicate registration.
+    await customApp.register(formbody);
+    await customApp.register(websocket);
+
+    server = new TACServer(tac, {
+      fastifyInstance: customApp,
+      port: currentPort,
+    });
+
+    // Must not throw
+    await server.start();
+
+    // TAC's form-body-parsed routes still work
+    const resp = await fetch(`http://localhost:${currentPort}/twiml`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'From=%2B15551234567&To=%2B15559876543&CallSid=CA123',
+    });
+    expect(resp.status).not.toBe(404);
+  });
+
+  it('creates a default Fastify instance when none is provided', () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+    });
+
+    expect(server.fastify).toBeDefined();
+    expect(typeof server.fastify.listen).toBe('function');
+  });
+
+  it('exposes the same Fastify instance before and after start()', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+    });
+
+    const before = server.fastify;
+    await server.start();
+    const after = server.fastify;
+
+    expect(after).toBe(before);
+  });
+
+  it('allows adding a custom route to server.fastify after construction', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+    });
+
+    server.fastify.get('/health', async () => ({ status: 'ok' }));
+
+    await server.start();
+
+    const resp = await fetch(`http://localhost:${currentPort}/health`);
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ status: 'ok' });
+  });
+
+  it('allows adding a hook to server.fastify after construction', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+    });
+
+    server.fastify.addHook('onSend', async (_request, reply, payload) => {
+      reply.header('x-test', 'yes');
+      return payload;
+    });
+
+    server.fastify.get('/ping', async () => ({ ok: true }));
+
+    await server.start();
+
+    const resp = await fetch(`http://localhost:${currentPort}/ping`);
+    expect(resp.headers.get('x-test')).toBe('yes');
+  });
+
+  it('allows adding a custom error handler on server.fastify', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+    });
+
+    class MyError extends Error {}
+
+    server.fastify.setErrorHandler(async (error, _request, reply) => {
+      if (error instanceof MyError) {
+        await reply.code(418).send({ handled: true });
+        return;
+      }
+      throw error;
+    });
+
+    server.fastify.get('/boom', async () => {
+      throw new MyError('kapow');
+    });
+
+    await server.start();
+
+    const resp = await fetch(`http://localhost:${currentPort}/boom`);
+    expect(resp.status).toBe(418);
+    expect(await resp.json()).toEqual({ handled: true });
+  });
+});
+
+describe('TACServer WebSocket signature validation', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let currentPort: number;
+
+  beforeEach(async () => {
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+
+    currentPort = getNextPort();
+
+    const config = new TACConfig(getTestConfig());
+    tac = await createTestTAC(config);
+
+    const smsChannel = new SMSChannel(tac);
+    const voiceChannel = new VoiceChannel(tac);
+    tac.registerChannel(smsChannel);
+    tac.registerChannel(voiceChannel);
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  it('should reject WebSocket without X-Twilio-Signature', async () => {
+    mockValidateRequest.mockReturnValue(false);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const ws = new WebSocket(`ws://localhost:${currentPort}/ws`);
+
+    const closeCode = await new Promise<number>((resolve, reject) => {
+      ws.on('close', (code: number) => resolve(code));
+      ws.on('error', (err: Error) => reject(err));
+    });
+
+    expect(closeCode).toBe(1008);
+  });
+
+  it('should reject WebSocket with invalid Twilio signature', async () => {
+    mockValidateRequest.mockReturnValue(false);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const ws = new WebSocket(`ws://localhost:${currentPort}/ws`, {
+      headers: { 'X-Twilio-Signature': 'invalid-signature' },
+    });
+
+    const closeCode = await new Promise<number>((resolve, reject) => {
+      ws.on('close', (code: number) => resolve(code));
+      ws.on('error', (err: Error) => reject(err));
+    });
+
+    expect(closeCode).toBe(1008);
+  });
+
+  it('should accept WebSocket with valid Twilio signature', async () => {
+    mockValidateRequest.mockReturnValue(true);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const ws = new WebSocket(`ws://localhost:${currentPort}/ws`, {
+      headers: { 'X-Twilio-Signature': 'valid-signature' },
+    });
+
+    const opened = await new Promise<boolean>(resolve => {
+      ws.on('open', () => resolve(true));
+      ws.on('close', () => resolve(false));
+      ws.on('error', () => resolve(false));
+    });
+
+    expect(opened).toBe(true);
+    ws.close();
+  });
+
+  it('should call validateRequest with correct params for WebSocket upgrade', async () => {
+    mockValidateRequest.mockReturnValue(true);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const ws = new WebSocket(`ws://localhost:${currentPort}/ws`, {
+      headers: { 'X-Twilio-Signature': 'test-ws-sig' },
+    });
+
+    await new Promise<void>(resolve => {
+      ws.on('open', () => resolve());
+      ws.on('error', () => resolve());
+    });
+
+    expect(mockValidateRequest).toHaveBeenCalledWith(
+      'test_token_123',
+      'test-ws-sig',
+      expect.stringMatching(/^wss?:\/\/.*\/ws$/),
+      {}
+    );
+
+    ws.close();
+  });
+
+  it('should extract query params from WebSocket URL for signature validation', async () => {
+    mockValidateRequest.mockReturnValue(true);
+
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const ws = new WebSocket(`ws://localhost:${currentPort}/ws?AccountSid=AC123&CallSid=CA456`, {
+      headers: { 'X-Twilio-Signature': 'test-ws-sig' },
+    });
+
+    await new Promise<void>(resolve => {
+      ws.on('open', () => resolve());
+      ws.on('error', () => resolve());
+    });
+
+    expect(mockValidateRequest).toHaveBeenCalledWith(
+      'test_token_123',
+      'test-ws-sig',
+      expect.stringMatching(/^wss?:\/\/.*\/ws$/),
+      { AccountSid: 'AC123', CallSid: 'CA456' }
+    );
+
+    ws.close();
+  });
+
+  it('should reject WebSocket when host header is missing', async () => {
+    server = new TACServer(tac, {
+      development: true,
+      port: currentPort,
+    });
+
+    await server.start();
+
+    const ws = new WebSocket(`ws://localhost:${currentPort}/ws`, {
+      headers: {
+        'X-Twilio-Signature': 'test-sig',
+        Host: '',
+      },
+    });
+
+    const closeCode = await new Promise<number>((resolve, reject) => {
+      ws.on('close', (code: number) => resolve(code));
+      ws.on('error', (err: Error) => reject(err));
+    });
+
+    expect(closeCode).toBe(1008);
+  });
+});
+
+describe('TACServer webhookPaths.messaging deprecation', () => {
+  const getTestConfig = () => ({
+    accountSid: 'ACtest123456789',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+    voicePublicDomain: 'test.ngrok.io',
+  });
+
+  let tac: TAC;
+  let server: TACServer;
+  let currentPort: number;
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    mockValidateRequest.mockReset();
+    mockValidateRequestWithBody.mockReset();
+    mockValidateRequest.mockReturnValue(true);
+
+    currentPort = getNextPort();
+
+    const config = new TACConfig(getTestConfig());
+    tac = await createTestTAC(config);
+
+    const smsChannel = new SMSChannel(tac);
+    const voiceChannel = new VoiceChannel(tac);
+    tac.registerChannel(smsChannel);
+    tac.registerChannel(voiceChannel);
+
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    consoleWarnSpy.mockRestore();
+    if (server) {
+      await server.stop().catch(() => {});
+    }
+    tac.shutdown();
+  });
+
+  it('should log deprecation warning when only messaging is set', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+      webhookPaths: {
+        messaging: '/old-webhook',
+      },
+    });
+
+    // Warning logged during construction
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'TACServer: The "webhookPaths.messaging" field is deprecated and will be removed in a future version. ' +
+          'Please update your configuration to use "webhookPaths.conversation" instead.'
+      )
+    );
+
+    await server.start();
+
+    // Verify the webhook is registered at the messaging path (now used as conversation)
+    const response = await fetch(`http://localhost:${currentPort}/old-webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'eventType=COMMUNICATION_CREATED&data=%7B%22conversationId%22%3A%22CH123%22%7D',
+    });
+
+    expect(response.status).not.toBe(404);
+  });
+
+  it('should use conversation and warn when both messaging and conversation are set', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+      webhookPaths: {
+        messaging: '/old-webhook',
+        conversation: '/new-webhook',
+      },
+    });
+
+    // Warning logged during construction
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'TACServer: The "webhookPaths.messaging" field is deprecated and will be removed in a future version. ' +
+          'Please update your configuration to use "webhookPaths.conversation" instead.'
+      )
+    );
+
+    await server.start();
+
+    // Verify the webhook is registered at the conversation path (conversation takes precedence)
+    const conversationResponse = await fetch(`http://localhost:${currentPort}/new-webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'eventType=COMMUNICATION_CREATED&data=%7B%22conversationId%22%3A%22CH123%22%7D',
+    });
+
+    expect(conversationResponse.status).not.toBe(404);
+
+    // Verify the old webhook path is NOT registered (ignored when conversation is set)
+    const messagingResponse = await fetch(`http://localhost:${currentPort}/old-webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'eventType=COMMUNICATION_CREATED&data=%7B%22conversationId%22%3A%22CH123%22%7D',
+    });
+
+    expect(messagingResponse.status).toBe(404);
+  });
+
+  it('should not log warning when only conversation is set', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+      webhookPaths: {
+        conversation: '/new-webhook',
+      },
+    });
+
+    // Should not have any deprecation warnings
+    expect(consoleWarnSpy).not.toHaveBeenCalled();
+
+    await server.start();
+
+    // Verify the webhook is registered at the conversation path
+    const response = await fetch(`http://localhost:${currentPort}/new-webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'eventType=COMMUNICATION_CREATED&data=%7B%22conversationId%22%3A%22CH123%22%7D',
+    });
+
+    expect(response.status).not.toBe(404);
+  });
+
+  it('should not log warning when neither messaging nor conversation is set', async () => {
+    server = new TACServer(tac, {
+      port: currentPort,
+    });
+
+    // Should not have any deprecation warnings
+    expect(consoleWarnSpy).not.toHaveBeenCalled();
+
+    await server.start();
+
+    // Verify default webhook path is used
+    const response = await fetch(`http://localhost:${currentPort}/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'eventType=COMMUNICATION_CREATED&data=%7B%22conversationId%22%3A%22CH123%22%7D',
+    });
+
+    expect(response.status).not.toBe(404);
+  });
+});

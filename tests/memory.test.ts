@@ -1,0 +1,547 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  TAC,
+  TACConfig,
+  ConversationSession,
+  MemoryRetrievalResponse,
+  ProfileResponse,
+  Communication,
+  TACMemoryResponse,
+  MemoryCommunication,
+} from '@twilio/tac-core';
+import { createTestTAC, createTestTACWithMemory } from './helpers/tac';
+
+describe('Memory Functionality', () => {
+  const getTestConfigWithoutMemory = () => ({
+
+    accountSid: 'ACtest123',
+    authToken: 'test_token_123',
+    apiKey: 'test_api_key',
+    apiSecret: 'test_api_token',
+    phoneNumber: '+15551234567',
+    conversationConfigurationId: 'conv_configuration_01kbjqhn79f0fvwfsxqzd5nqhd',
+  });
+
+  const getTestConfigWithMemory = () => ({
+    ...getTestConfigWithoutMemory(),
+    memoryStoreId: 'mem_service_01kbjqhhdpft0tbp21jt4ktbxg',
+  });
+
+  describe('retrieveMemory() with Memory Service', () => {
+    it('should retrieve memory with profile_id provided', async () => {
+      
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockMemoryResponse: MemoryRetrievalResponse = {
+        observations: [],
+        summaries: [],
+        communications: [],
+      };
+
+      // Mock the memory client method
+      const memoryClient = tac.getMemoryClient();
+      expect(memoryClient).toBeDefined();
+      vi.spyOn(memoryClient!, 'retrieveMemories').mockResolvedValue(mockMemoryResponse);
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: 'mem_profile_existing',
+        channel: 'sms',
+        startedAt: new Date(),
+      };
+
+      const result = await tac.retrieveMemory(session, 'test query', session.conversationId);
+
+      // Result is wrapped in TACMemoryResponse
+      expect(result).toBeInstanceOf(TACMemoryResponse);
+      expect(result.hasMemoryFeatures).toBe(true);
+      expect(result.rawData).toEqual(mockMemoryResponse);
+      expect(memoryClient!.retrieveMemories).toHaveBeenCalledWith(
+        'mem_profile_existing',
+        {
+          conversationId: 'conv_test_123',
+          query: 'test query',
+          observationsLimit: 20,
+          summariesLimit: 5,
+          communicationsLimit: 0,
+          relevanceThreshold: 0.0,
+        }
+      );
+    });
+
+    it('should omit conversationId from /Recall when the caller does not pass one', async () => {
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockMemoryResponse: MemoryRetrievalResponse = {
+        observations: [],
+        summaries: [],
+        communications: [],
+      };
+
+      const memoryClient = tac.getMemoryClient();
+      expect(memoryClient).toBeDefined();
+      vi.spyOn(memoryClient!, 'retrieveMemories').mockResolvedValue(mockMemoryResponse);
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: 'mem_profile_existing',
+        channel: 'sms',
+        startedAt: new Date(),
+      };
+
+      // Omitted by the caller, so it must not be pulled off the session.
+      await tac.retrieveMemory(session);
+
+      expect(memoryClient!.retrieveMemories).toHaveBeenCalledWith('mem_profile_existing', {
+        conversationId: undefined,
+        query: undefined,
+        observationsLimit: 20,
+        summariesLimit: 5,
+        communicationsLimit: 0,
+        relevanceThreshold: 0.0,
+      });
+    });
+
+    it('should auto-lookup profile when missing', async () => {
+
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockLookupResponse = {
+        normalized_value: '+13175556789',
+        profiles: ['mem_profile_00000000000000000000000001'],
+      };
+
+      const mockMemoryResponse: MemoryRetrievalResponse = {
+        observations: [],
+        summaries: [],
+        communications: [],
+      };
+
+      const memoryClient = tac.getMemoryClient();
+      expect(memoryClient).toBeDefined();
+      vi.spyOn(memoryClient!, 'lookupProfile').mockResolvedValue(mockLookupResponse);
+      vi.spyOn(memoryClient!, 'retrieveMemories').mockResolvedValue(mockMemoryResponse);
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: undefined,
+        channel: 'sms',
+        startedAt: new Date(),
+        authorInfo: {
+          address: '+1 (317) 555-6789',
+          participantId: 'participant_123',
+        },
+      };
+
+      const result = await tac.retrieveMemory(session, 'test query', session.conversationId);
+
+      // Verify profile was looked up
+      expect(memoryClient!.lookupProfile).toHaveBeenCalledWith(
+        'phone',
+        '+1 (317) 555-6789'
+      );
+
+      // Verify profile_id was assigned
+      expect(session.profileId).toBe('mem_profile_00000000000000000000000001');
+
+      // Verify memory was retrieved with the looked up profile_id
+      expect(memoryClient!.retrieveMemories).toHaveBeenCalledWith(
+        'mem_profile_00000000000000000000000001',
+        {
+          conversationId: 'conv_test_123',
+          query: 'test query',
+          observationsLimit: 20,
+          summariesLimit: 5,
+          communicationsLimit: 0,
+          relevanceThreshold: 0.0,
+        }
+      );
+
+      // Result is wrapped in TACMemoryResponse
+      expect(result).toBeInstanceOf(TACMemoryResponse);
+      expect(result.rawData).toEqual(mockMemoryResponse);
+    });
+
+    it('should use first profile when multiple found', async () => {
+      
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockLookupResponse = {
+        normalized_value: '+13175556789',
+        profiles: [
+          'mem_profile_00000000000000000000000001',
+          'mem_profile_00000000000000000000000002',
+          'mem_profile_00000000000000000000000003',
+        ],
+      };
+
+      const mockMemoryResponse: MemoryRetrievalResponse = {
+        observations: [],
+        summaries: [],
+        communications: [],
+      };
+
+      const memoryClient = tac.getMemoryClient();
+      vi.spyOn(memoryClient!, 'lookupProfile').mockResolvedValue(mockLookupResponse);
+      vi.spyOn(memoryClient!, 'retrieveMemories').mockResolvedValue(mockMemoryResponse);
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: undefined,
+        channel: 'sms',
+        startedAt: new Date(),
+        authorInfo: { address: '+13175556789' },
+      };
+
+      await tac.retrieveMemory(session, undefined, session.conversationId);
+
+      // Verify first profile was used
+      expect(session.profileId).toBe('mem_profile_00000000000000000000000001');
+      expect(memoryClient!.retrieveMemories).toHaveBeenCalledWith(
+        'mem_profile_00000000000000000000000001',
+        {
+          conversationId: 'conv_test_123',
+          query: undefined,
+          observationsLimit: 20,
+          summariesLimit: 5,
+          communicationsLimit: 0,
+          relevanceThreshold: 0.0,
+        }
+      );
+    });
+
+    it('should fallback to Conversations API when profile_id and author_info both missing', async () => {
+
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockCommunications: Communication[] = [
+        {
+          id: 'comm_123',
+          conversationId: 'conv_test_123',
+          accountId: 'AC123',
+          author: { address: '+15551234567', channel: 'SMS', participantId: 'part_123' },
+          content: { type: 'TEXT', text: 'Hello' },
+          recipients: [],
+        },
+      ];
+
+      const conversationClient = tac.getConversationClient();
+      vi.spyOn(conversationClient, 'listCommunications').mockResolvedValue(
+        mockCommunications
+      );
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: undefined,
+        channel: 'sms',
+        startedAt: new Date(),
+        authorInfo: undefined,
+      };
+
+      const result = await tac.retrieveMemory(session);
+
+      expect(result).toBeInstanceOf(TACMemoryResponse);
+      expect(result.communications).toHaveLength(1);
+    });
+
+    it('should fallback to Conversations API when author_info exists but address is empty', async () => {
+
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockCommunications: Communication[] = [
+        {
+          id: 'comm_456',
+          conversationId: 'conv_test_123',
+          accountId: 'AC123',
+          author: { address: '+15551234567', channel: 'SMS', participantId: 'part_456' },
+          content: { type: 'TEXT', text: 'Test' },
+          recipients: [],
+        },
+      ];
+
+      const conversationClient = tac.getConversationClient();
+      vi.spyOn(conversationClient, 'listCommunications').mockResolvedValue(
+        mockCommunications
+      );
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: undefined,
+        channel: 'sms',
+        startedAt: new Date(),
+        authorInfo: {
+          address: '',
+          participantId: 'participant_123',
+        },
+      };
+
+      const result = await tac.retrieveMemory(session);
+
+      expect(result).toBeInstanceOf(TACMemoryResponse);
+      expect(result.communications).toHaveLength(1);
+    });
+
+    it('should fallback to Conversations API when profile lookup returns no profiles', async () => {
+
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockLookupResponse = {
+        normalized_value: '+13175556789',
+        profiles: [],
+      };
+
+      const mockCommunications: Communication[] = [
+        {
+          id: 'comm_789',
+          conversationId: 'conv_test_123',
+          accountId: 'AC123',
+          author: { address: '+13175556789', channel: 'SMS', participantId: 'part_789' },
+          content: { type: 'TEXT', text: 'Fallback' },
+          recipients: [],
+        },
+      ];
+
+      const memoryClient = tac.getMemoryClient();
+      vi.spyOn(memoryClient, 'lookupProfile').mockResolvedValue(mockLookupResponse);
+
+      const conversationClient = tac.getConversationClient();
+      vi.spyOn(conversationClient, 'listCommunications').mockResolvedValue(
+        mockCommunications
+      );
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: undefined,
+        channel: 'sms',
+        startedAt: new Date(),
+        authorInfo: { address: '+13175556789' },
+      };
+
+      const result = await tac.retrieveMemory(session);
+
+      expect(result).toBeInstanceOf(TACMemoryResponse);
+      expect(result.communications).toHaveLength(1);
+    });
+
+    it('should fallback to Conversations API on profile lookup errors', async () => {
+
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockCommunications: Communication[] = [
+        {
+          id: 'comm_error',
+          conversationId: 'conv_test_123',
+          accountId: 'AC123',
+          author: { address: '+13175556789', channel: 'SMS', participantId: 'part_error' },
+          content: { type: 'TEXT', text: 'Fallback on error' },
+          recipients: [],
+        },
+      ];
+
+      const memoryClient = tac.getMemoryClient();
+      vi.spyOn(memoryClient, 'lookupProfile').mockRejectedValue(
+        new Error('Profile lookup API error')
+      );
+
+      const conversationClient = tac.getConversationClient();
+      vi.spyOn(conversationClient, 'listCommunications').mockResolvedValue(
+        mockCommunications
+      );
+
+      const session: ConversationSession = {
+        conversationId: 'conv_test_123',
+        profileId: undefined,
+        channel: 'sms',
+        startedAt: new Date(),
+        authorInfo: { address: '+13175556789' },
+      };
+
+      const result = await tac.retrieveMemory(session);
+
+      expect(result).toBeInstanceOf(TACMemoryResponse);
+      expect(result.communications).toHaveLength(1);
+    });
+  });
+
+
+  describe('fetchProfile()', () => {
+    it('should fetch profile successfully', async () => {
+      
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const mockProfileResponse: ProfileResponse = {
+        id: 'profile_123',
+        createdAt: '2024-01-01T00:00:00Z',
+        traits: {
+          name: 'John Doe',
+          email: 'john@example.com',
+        },
+      };
+
+      const memoryClient = tac.getMemoryClient();
+      vi.spyOn(memoryClient!, 'getProfile').mockResolvedValue(mockProfileResponse);
+
+      const result = await tac.fetchProfile('profile_123');
+
+      expect(result).toEqual(mockProfileResponse);
+      expect(memoryClient!.getProfile).toHaveBeenCalledWith(
+        'profile_123',
+        undefined
+      );
+    });
+
+    it('should return undefined when memory not configured', async () => {
+      const tac = await createTestTAC(getTestConfigWithoutMemory());
+
+      const result = await tac.fetchProfile('profile_123');
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return undefined when profileId is empty', async () => {
+      
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const result = await tac.fetchProfile('');
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should handle API errors gracefully', async () => {
+      
+      const tac = await createTestTACWithMemory(getTestConfigWithoutMemory());
+
+      const memoryClient = tac.getMemoryClient();
+      vi.spyOn(memoryClient!, 'getProfile').mockRejectedValue(new Error('API error'));
+
+      const result = await tac.fetchProfile('profile_123');
+
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('TACCommunication conversion', () => {
+    it('should populate Memory-only fields from Memory communication', () => {
+      const memoryCommunications: MemoryCommunication[] = [
+        {
+          id: 'mem_comm_123',
+          author: {
+            id: 'author_123',
+            name: 'John Doe',
+            type: 'CUSTOMER',
+            address: '+15551234567',
+            channel: 'SMS',
+            profileId: 'profile_456',
+          },
+          content: { text: 'Hello from Memory' },
+          recipients: [
+            {
+              id: 'recipient_789',
+              name: 'AI Agent',
+              type: 'AI_AGENT',
+              address: '+15559876543',
+              channel: 'SMS',
+            },
+          ],
+          channelId: 'SM123',
+          createdAt: '2025-01-15T10:15:30Z',
+        },
+      ];
+
+      const response = new TACMemoryResponse({
+        observations: [],
+        summaries: [],
+        communications: memoryCommunications,
+      });
+
+      const comm = response.communications[0];
+
+      // Memory-only fields populated
+      expect(comm.author.id).toBe('author_123');
+      expect(comm.author.name).toBe('John Doe');
+      expect(comm.author.type).toBe('CUSTOMER');
+      expect(comm.author.profileId).toBe('profile_456');
+
+      // Conversation Orchestrator-only fields are undefined
+      expect(comm.author.participantId).toBeUndefined();
+      expect(comm.conversationId).toBeUndefined();
+      expect(comm.accountId).toBeUndefined();
+      expect(comm.content.type).toBeUndefined();
+    });
+
+    it('should populate Conversation Orchestrator-only fields from Conversation Orchestrator communication', () => {
+      const response = new TACMemoryResponse([
+        {
+          id: 'comm_789',
+          conversationId: 'CONV123',
+          accountId: 'AC456',
+          author: { address: '+15551234567', channel: 'SMS', participantId: 'part_customer' },
+          content: { type: 'TEXT', text: 'Hello from Conversation Orchestrator' },
+          recipients: [
+            {
+              address: '+15559876543',
+              channel: 'SMS',
+              participantId: 'part_agent',
+              deliveryStatus: 'DELIVERED',
+            },
+          ],
+          channelId: 'SM456',
+        },
+      ]);
+
+      const comm = response.communications[0];
+
+      // Conversation Orchestrator-only fields populated
+      expect(comm.conversationId).toBe('CONV123');
+      expect(comm.accountId).toBe('AC456');
+      expect(comm.author.participantId).toBe('part_customer');
+      expect(comm.content.type).toBe('TEXT');
+      expect(comm.recipients[0].deliveryStatus).toBe('DELIVERED');
+
+      // Memory-only fields are undefined
+      expect(comm.author.id).toBeUndefined();
+      expect(comm.author.name).toBeUndefined();
+      expect(comm.author.type).toBeUndefined();
+      expect(comm.author.profileId).toBeUndefined();
+    });
+
+    it('should parse TRANSCRIPTION content with nested transcription', () => {
+      const response = new TACMemoryResponse([
+        {
+          id: 'comm_voice',
+          conversationId: 'CONV_VOICE',
+          accountId: 'AC_VOICE',
+          author: { address: '+15551234567', channel: 'VOICE', participantId: 'part_voice' },
+          content: {
+            type: 'TRANSCRIPTION',
+            text: 'Hello, I need help',
+            transcription: {
+              channel: 0,
+              confidence: 0.95,
+              engine: 'google',
+              words: [
+                {
+                  text: 'Hello',
+                  startTime: '2025-01-15T12:00:00.100Z',
+                  endTime: '2025-01-15T12:00:00.300Z',
+                },
+                { text: 'I', startTime: '2025-01-15T12:00:00.400Z' },
+              ],
+            },
+          },
+          recipients: [{ address: '+15559876543', channel: 'VOICE', participantId: 'part_agent' }],
+        },
+      ]);
+
+      const comm = response.communications[0];
+
+      expect(comm.content.type).toBe('TRANSCRIPTION');
+      expect(comm.content.transcription?.channel).toBe(0);
+      expect(comm.content.transcription?.confidence).toBe(0.95);
+      expect(comm.content.transcription?.engine).toBe('google');
+      expect(comm.content.transcription?.words).toHaveLength(2);
+      expect(comm.content.transcription?.words?.[0].text).toBe('Hello');
+      expect(comm.content.transcription?.words?.[0].startTime).toBe('2025-01-15T12:00:00.100Z');
+    });
+  });
+});
