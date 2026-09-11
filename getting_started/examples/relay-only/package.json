@@ -11,7 +11,7 @@
   "dependencies": {
     "twilio-agent-connect": "file:../../..",
     "dotenv": "^16.4.5",
-    "@openai/agents": "^0.8.5"
+    "@openai/agents": "^0.17.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
